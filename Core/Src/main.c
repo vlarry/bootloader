@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "fatfs_sd.h"
 #include "string.h"
+#include "stdio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,14 +34,14 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define PROGRAM_SECTOR_START  FLASH_SECTOR_4 // start sector is number 4
-#define PROGRAM_START_ADDRESS (uint32_t)(PROGRAM_SECTOR_START * 16 * 1024)
+#define PROGRAM_SECTOR_START FLASH_SECTOR_4 // start sector is number 4
+#define APPLICATION_ADDRESS  (uint32_t)((FLASH_BASE + (PROGRAM_SECTOR_START * 16 * 1024)))
 #define BLOCK_SIZE_MAX 512
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+typedef void (*pFunction)(void);
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -57,7 +58,8 @@ static void MX_SPI1_Init(void);
 /* USER CODE BEGIN PFP */
 void JumpToApplication();
 void UpdateFirmware();
-void ProgramPagesErase();
+void EaraseAppFlash();
+void WriteAppFlash(uint32_t address, TCHAR *data, size_t size);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -104,18 +106,18 @@ int main(void)
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
-  HAL_Delay(500);
-  UpdateFirmware();
-//  if (state == GPIO_PIN_RESET)
-//  {
-//	  HAL_Delay(50);
-//	  state = HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin);
-//	  if (state == GPIO_PIN_RESET)
-//	  {
-//		  UpdateFirmware();
-//	  }
-//  }
-  //JumpToApplication();
+  HAL_Delay(100);
+  //UpdateFirmware();
+  GPIO_PinState state = HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin);
+  if (state == GPIO_PIN_RESET)
+  {
+	  state = HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin);
+	  if (state == GPIO_PIN_RESET)
+	  {
+		  UpdateFirmware();
+	  }
+  }
+  JumpToApplication();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -258,15 +260,24 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void JumpToApplication(void)
 {
-	__disable_irq();
-	uint32_t appJumpAddress = 0;
-	void (*GoToApp)(void);
-	appJumpAddress = *(__IO uint32_t*) (PROGRAM_START_ADDRESS + 4);
-	GoToApp = (void (*)(void))appJumpAddress;
-	SCB->VTOR = PROGRAM_START_ADDRESS;
-	__set_MSP((volatile uint32_t)PROGRAM_START_ADDRESS);
-	__enable_irq();
-	GoToApp();
+	printf("Start MainApp at:0x%.8x\n", (unsigned int)APPLICATION_ADDRESS);
+	pFunction appEntry;
+	uint32_t appStack;
+
+	/* Get the application stack pointer (First entry in the application vector table) */
+	appStack = (uint32_t) *((__IO uint32_t*)APPLICATION_ADDRESS);
+
+	/* Get the application entry point (Second entry in the application vector table) */
+	appEntry = (pFunction) *(__IO uint32_t*) (APPLICATION_ADDRESS + 4);
+
+	/* Reconfigure vector table offset register to match the application location */
+	SCB->VTOR = APPLICATION_ADDRESS;
+
+	/* Set the application stack pointer */
+	__set_MSP(appStack);
+
+	/* Start the application */
+	appEntry();
 }
 //-------------------
 void UpdateFirmware()
@@ -281,7 +292,7 @@ void UpdateFirmware()
 	  fres = f_open(&file, "firmware.bin", FA_OPEN_ALWAYS | FA_WRITE | FA_READ);
 	  if (fres == FR_OK)
 	  {
-		  ProgramPagesErase();
+		  EaraseAppFlash();
 		  FSIZE_t file_size = f_size(&file);
 		  if(file_size > 0)
 		  {
@@ -295,14 +306,25 @@ void UpdateFirmware()
 					  byte_count = file_size - rbytes;
 				  f_lseek(&file, rbytes);
 				  f_gets(buffer, byte_count, &file);
+				  WriteAppFlash(APPLICATION_ADDRESS + rbytes, buffer, byte_count);
 				  rbytes += byte_count;
+			  }
+			  if (rbytes == file_size)
+			  {
+				  printf("Firmware is loading = %d\n", (int)rbytes);
+				  for (uint8_t i = 0; i < 100; i++)
+				  {
+					  HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+					  HAL_Delay(50);
+				  }
 			  }
 		  }
 	  }
 	}
+	HAL_NVIC_SystemReset();
 }
-//----------------------
-void ProgramPagesErase()
+//-------------------
+void EaraseAppFlash()
 {
 	HAL_FLASH_Unlock();
 	uint32_t sector_error;
@@ -314,8 +336,18 @@ void ProgramPagesErase()
 		.NbSectors = FLASH_SECTOR_TOTAL - PROGRAM_SECTOR_START,
 		.VoltageRange = FLASH_VOLTAGE_RANGE_1
 	};
+	HAL_FLASHEx_Erase(&flash_erase, &sector_error);
+	HAL_FLASH_Lock();
+}
+//-----------------------------------------------------------
+void WriteAppFlash(uint32_t address, TCHAR *data, size_t size)
+{
+	HAL_FLASH_Unlock();
 
-	HAL_StatusTypeDef status = HAL_FLASHEx_Erase(&flash_erase, &sector_error);
+	for (uint16_t i = 0; i < size; i++)
+	{
+		HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE, address + i, data[i]);
+	}
 
 	HAL_FLASH_Lock();
 }
