@@ -58,8 +58,8 @@ static void MX_SPI1_Init(void);
 /* USER CODE BEGIN PFP */
 void JumpToApplication();
 void UpdateFirmware();
-void EaraseAppFlash();
-void WriteAppFlash(uint32_t address, TCHAR *data, size_t size);
+HAL_StatusTypeDef EaraseAppFlash();
+void WriteAppFlash(uint32_t offset, uint32_t address, TCHAR *data, size_t size);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -199,7 +199,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_128;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -289,44 +289,77 @@ void UpdateFirmware()
 	fres = f_mount(&fatfs, "", 0);
 	if (fres == FR_OK)
 	{
-	  fres = f_open(&file, "firmware.bin", FA_OPEN_ALWAYS | FA_WRITE | FA_READ);
+	  fres = f_open(&file, "firmware.bin", FA_READ);
 	  if (fres == FR_OK)
 	  {
-		  EaraseAppFlash();
-		  FSIZE_t file_size = f_size(&file);
-		  if(file_size > 0)
+		  if (EaraseAppFlash() != HAL_OK)
 		  {
-			  uint32_t block_count = (uint32_t)(file_size / BLOCK_SIZE_MAX) + ((file_size % BLOCK_SIZE_MAX) ? 1 : 0);
-			  uint32_t rbytes = 0;
+			  printf("An Error earasing flash program!\n");
+			  Error_Handler();
+		  }
+
+		  printf("An earasing flash is successfully!\n");
+
+		  FSIZE_t fsize = f_size(&file);
+		  if (fsize <= 0)
+		  {
+			  printf("A firmware file is empty!");
+			  return;
+		  }
+
+		  printf("A file size is %u\n", (unsigned int)fsize);
+
+		  uint32_t rbytes = 0;
+		  while (rbytes < fsize)
+		  {
 			  TCHAR buffer[BLOCK_SIZE_MAX];
-			  for (uint32_t i = 0; i < block_count; i++)
+			  UINT len = 0;
+			  fres = f_lseek(&file, rbytes);
+			  if (fres != FR_OK)
 			  {
-				  uint32_t byte_count = BLOCK_SIZE_MAX;
-				  if (file_size - rbytes < BLOCK_SIZE_MAX)
-					  byte_count = file_size - rbytes;
-				  f_lseek(&file, rbytes);
-				  f_gets(buffer, byte_count, &file);
-				  WriteAppFlash(APPLICATION_ADDRESS + rbytes, buffer, byte_count);
-				  rbytes += byte_count;
+				  printf("An error offset position in file!\n");
+				  Error_Handler();
 			  }
-			  if (rbytes == file_size)
+			  f_read(&file, buffer, sizeof(buffer), &len);
+			  if (len > 0)
 			  {
-				  printf("Firmware is loading = %d\n", (int)rbytes);
-				  for (uint8_t i = 0; i < 100; i++)
+				  for (int i = 0; i < len; i += 4)
 				  {
-					  HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-					  HAL_Delay(50);
+					  printf("BYTE = 0x%02x%02x%02x%02x\n", buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]);
 				  }
+				  WriteAppFlash(APPLICATION_ADDRESS, rbytes, buffer, len);
+				  rbytes += len;
+				  printf("A reading is %u bytes (curent = %u, total = %u bytes)\n", (unsigned int)len, (unsigned int)rbytes, (unsigned int)fsize);
+			  }
+			  else
+			  {
+				  printf("A reading data is empty!\n");
+				  Error_Handler();
 			  }
 		  }
+		  if (rbytes == fsize)
+		  {
+			  printf("A firmware is loading successfully (size = %u)!\n", (unsigned int)rbytes);
+			  for (uint8_t i = 0; i < 10; i++)
+			  {
+				  HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+				  HAL_Delay(100);
+			  }
+		  }
+		  else
+		  {
+			  printf("An error loading firmware (%u from %u)\n", (unsigned int)rbytes, (unsigned int)fsize);
+			  Error_Handler();
+		  }
 	  }
+	  f_close(&file);
 	}
-	HAL_NVIC_SystemReset();
 }
-//-------------------
-void EaraseAppFlash()
+//--------------------------------
+HAL_StatusTypeDef EaraseAppFlash()
 {
 	HAL_FLASH_Unlock();
+	HAL_StatusTypeDef status;
 	uint32_t sector_error;
 
 	FLASH_EraseInitTypeDef flash_erase =
@@ -336,17 +369,20 @@ void EaraseAppFlash()
 		.NbSectors = FLASH_SECTOR_TOTAL - PROGRAM_SECTOR_START,
 		.VoltageRange = FLASH_VOLTAGE_RANGE_1
 	};
-	HAL_FLASHEx_Erase(&flash_erase, &sector_error);
+	status = HAL_FLASHEx_Erase(&flash_erase, &sector_error);
 	HAL_FLASH_Lock();
+
+	return status;
 }
-//-----------------------------------------------------------
-void WriteAppFlash(uint32_t address, TCHAR *data, size_t size)
+//-----------------------------------------------------------------------------
+void WriteAppFlash(uint32_t offset, uint32_t address, TCHAR *data, size_t size)
 {
 	HAL_FLASH_Unlock();
 
 	for (uint16_t i = 0; i < size; i++)
 	{
-		HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE, address + i, data[i]);
+		uint32_t addr = offset + address + i;
+		HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE, addr, data[i]);
 	}
 
 	HAL_FLASH_Lock();
